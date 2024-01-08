@@ -1,8 +1,9 @@
 #!/bin/bash
+# NOTE deprecated in favor of /home/moritz/Projects/single-cellm/src/llava_dataset/Snakefile
 
 deepspeed llava/train/train_mem.py \
-    --deepspeed ./scripts/zero2.json \
-    --model_name_or_path lmsys/vicuna-13b-v1.5 \
+          --deepspeed ./scripts/zero2.json \
+          --model_name_or_path lmsys/vicuna-13b-v1.5 \
     --version plain \
     --data_path ./playground/data/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json \
     --image_folder ./playground/data/LLaVA-Pretrain/images \

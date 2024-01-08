@@ -1,7 +1,17 @@
+"""
+This wraps the image tower, which we don't use because we create a dedicated dataset with transcriptome embeddings.
+
+I anyways introduced the (untested) necessary changes, in case we want to use this class later
+"""
+from pathlib import Path
 import torch
 import torch.nn as nn
 
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
+
+# from single_cellm.jointemb.single_cellm_lightning import TranscriptomeTextDualEncoderLightning
+# from single_cellm.jointemb.processing import TranscriptomeTextDualEncoderProcessor
+# from single_cellm.config import get_path, model_path_from_name
 
 
 class CLIPVisionTower(nn.Module):
@@ -19,22 +29,44 @@ class CLIPVisionTower(nn.Module):
         elif getattr(args, 'unfreeze_mm_vision_tower', False):
             self.load_model()
         else:
+            raise NotImplementedError('Delay load not implemented')
             self.cfg_only = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
 
-    def load_model(self, device_map=None):
-        if self.is_loaded:
-            print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
-            return
+    def load_model(self):
 
-        self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        model_path = Path(self.vision_tower_name).expanduser()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        pl_model = TranscriptomeTextDualEncoderLightning.load_from_checkpoint(model_path)
+        pl_model.eval().to(device)
+        pl_model.model.prepare_models(
+            pl_model.model.transcriptome_model, pl_model.model.text_model, force_freeze=True
+        )
+        pl_model.freeze()
+
+        # TODO transcriptome_processor_kwargs might be missing
+        processor = TranscriptomeTextDualEncoderProcessor(
+            pl_model.model.transcriptome_model.config.model_type,
+            model_path_from_name(pl_model.model.text_model.config.model_type),
+        )
+
+        tokenizer = processor.tokenizer
+        self.image_processor = processor.transcriptome_processor
+
+        self.vision_tower = pl_model.model  # TODO this includes both models
         self.vision_tower.requires_grad_(False)
 
         self.is_loaded = True
 
     def feature_select(self, image_forward_outs):
-        image_features = image_forward_outs.hidden_states[self.select_layer]
+        if self.select_layer == -1:  # get shared embeddings
+            image_features = image_forward_outs[1]
+        elif self.select_layer == -2:  # get image block output (features)
+            image_features = image_forward_outs[0]
+        else:
+            raise ValueError(f'Unexpected select layer: {self.select_layer}')
+
         if self.select_feature == 'patch':
+            raise NotImplementedError('Patch not implemented')
             image_features = image_features[:, 1:]
         elif self.select_feature == 'cls_patch':
             image_features = image_features
@@ -47,11 +79,11 @@ class CLIPVisionTower(nn.Module):
         if type(images) is list:
             image_features = []
             for image in images:
-                image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
+                image_forward_out = self.vision_tower.get_transcriptome_features(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
                 image_feature = self.feature_select(image_forward_out).to(image.dtype)
                 image_features.append(image_feature)
         else:
-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
+            image_forward_outs = self.vision_tower.get_transcriptome_features(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
             image_features = self.feature_select(image_forward_outs).to(images.dtype)
 
         return image_features

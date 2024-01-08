@@ -146,6 +146,7 @@ class ModelWorker:
                     replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
                 prompt = prompt.replace(DEFAULT_IMAGE_TOKEN, replace_token)
 
+                # TODO use the 'num-token' information in `mm_projector_type`
                 num_image_tokens = prompt.count(replace_token) * model.get_vision_tower().num_patches
             else:
                 images = None
