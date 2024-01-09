@@ -1,5 +1,5 @@
 #!/bin/bash
-# NOTE deprecated in favor of /home/moritz/Projects/single-cellm/src/llava_dataset/Snakefile
+# NOTE deprecated in favor of /home/moritz/Projects/single-cellm/src/llava_wrapper/Snakefile
 
 deepspeed llava/train/train_mem.py \
           --deepspeed ./scripts/zero2.json \
