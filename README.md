@@ -80,7 +80,9 @@ cd LLaVA
 ```Shell
 conda create -n llava python=3.10 -y
 conda activate llava
-pip install --upgrade pip  # enable PEP 660 support
+conda install nbconvert ipykernel  # TODO need to create a proper llava env yaml
+python -m ipykernel install --user --name llava_env --display-name "Python (llava)"  # needed for my llava-powered notebooks (in my pipelines)
+
 pip install -e .
 ```
 
