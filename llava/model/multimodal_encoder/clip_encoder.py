@@ -9,9 +9,9 @@ import torch.nn as nn
 
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 
-# from single_cellm.jointemb.single_cellm_lightning import TranscriptomeTextDualEncoderLightning
-# from single_cellm.jointemb.processing import TranscriptomeTextDualEncoderProcessor
-# from single_cellm.config import get_path, model_path_from_name
+# from cellwhisperer.jointemb.cellwhisperer_lightning import TranscriptomeTextDualEncoderLightning
+# from cellwhisperer.jointemb.processing import TranscriptomeTextDualEncoderProcessor
+# from cellwhisperer.config import get_path, model_path_from_name
 
 
 class CLIPVisionTower(nn.Module):
