@@ -78,7 +78,8 @@ cd LLaVA
 
 2. Install Package
 ```Shell
-conda create -n llava python=3.10 -y
+# need nvcc to be able to install deepspeed -.-
+conda create -n llava python=3.10 cuda-nvcc -y
 conda activate llava
 conda install nbconvert ipykernel  # TODO need to create a proper llava env yaml
 python -m ipykernel install --user --name llava_env --display-name "Python (llava)"  # needed for my llava-powered notebooks (in my pipelines)
@@ -180,7 +181,7 @@ flowchart BT
     subgraph Demo Connections
         direction BT
         c<-->gws
-        
+
         mw7b<-->c
         mw13b<-->c
         lsglw13b<-->c
@@ -431,14 +432,14 @@ If you find LLaVA useful for your research and applications, please cite using t
 }
 
 @misc{liu2023improvedllava,
-      title={Improved Baselines with Visual Instruction Tuning}, 
+      title={Improved Baselines with Visual Instruction Tuning},
       author={Liu, Haotian and Li, Chunyuan and Li, Yuheng and Lee, Yong Jae},
       publisher={arXiv:2310.03744},
       year={2023},
 }
 
 @misc{liu2023llava,
-      title={Visual Instruction Tuning}, 
+      title={Visual Instruction Tuning},
       author={Liu, Haotian and Li, Chunyuan and Wu, Qingyang and Lee, Yong Jae},
       publisher={NeurIPS},
       year={2023},

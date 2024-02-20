@@ -665,18 +665,25 @@ class LazySupervisedDataset(Dataset):
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments):
         super(LazySupervisedDataset, self).__init__()
+
         list_data_dict = json.load(open(data_path, "r"))
 
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
+
         self.image_data = dict(np.load(self.data_args.image_data, allow_pickle=True))
+
+        # Identify nan rows from images and filter list_data_dict to not contain those entries
+        nans = np.where(np.isnan(self.image_data["transcriptome_embeds"]))
+        broken_ids = self.image_data["orig_ids"][np.unique(nans[0])]
+
         self.select_layer = data_args.mm_vision_select_layer
 
         self.orig_id_to_int = {k: v for k, v in zip(self.image_data["orig_ids"], range(len(self.image_data["orig_ids"])))}
         # filter list_data_dict to only contain valid keys
-        self.list_data_dict = [e for e in self.list_data_dict if e["image"] in self.orig_id_to_int]
+        self.list_data_dict = [e for e in self.list_data_dict if e["image"] in self.orig_id_to_int and e["image"] not in broken_ids]
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -698,7 +705,8 @@ class LazySupervisedDataset(Dataset):
     @property
     def modality_lengths(self):
         """
-        TODO: what is this function for. do I need it?
+        Returns the total length of each conversation. If no "image" in the sample, return the negative of the length.
+        Used for sorting samples (for training)
         """
         length_list = []
         for sample in self.list_data_dict:
@@ -744,7 +752,7 @@ class LazySupervisedDataset(Dataset):
             data_dict['image'] = torch.from_numpy(image)
         elif self.data_args.is_multimodal:
             # image does not exist in the data, but the model is multimodal
-            raise NotImplementedError("TODO need to add an 'empty' transcriptome vector")
+            raise NotImplementedError("need to add an 'empty' transcriptome vector")
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
         return data_dict
