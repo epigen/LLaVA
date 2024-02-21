@@ -149,7 +149,7 @@ class LlavaMetaForCausalLM(ABC):
     ):
         vision_tower = self.get_vision_tower()  # TODO unused delete
         if images is None or input_ids.shape[1] == 1:  # this is being called from the second token on (for efficient inference) # or vision_tower is None
-            import ipdb; ipdb.set_trace()  # NOTE: the new version of llava  only returns and does not mess with attention_mask and position_ids anymore
+            # TODO debug this at some point whether everything works as it should (the commented block below got deleted in a newer version of llava)
             # if past_key_values is not None and images is not None and input_ids.shape[1] == 1:  # and vision_tower is not None (our vision_tower is None, sorry)
             #     target_shape = past_key_values[-1][-1].shape[-2] + 1
             #     attention_mask = torch.cat((attention_mask, torch.ones(
@@ -160,7 +160,8 @@ class LlavaMetaForCausalLM(ABC):
             #     position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-        if type(images) is list or images.ndim == 5:
+        if type(images) is list or images.ndim == 5:  # TODO delete?
+            raise NotImplemented("should not be called as these are for read images")
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
             concat_images = torch.cat([image for image in images], dim=0)

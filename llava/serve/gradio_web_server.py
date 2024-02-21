@@ -3,6 +3,7 @@ import datetime
 import json
 import os
 import time
+import numpy as np
 
 import gradio as gr
 import requests
@@ -239,7 +240,10 @@ def http_bot(state, model_selector, temperature, top_p, max_new_tokens, request:
     }
     logger.info(f"==== request ====\n{pload}")
 
+
     pload['images'] = state.get_images()
+    # set pload['images'] with a list of 2048 random float (mean 0, std= 0.1).
+    pload['images'] = [np.random.normal(0, 0.1, 2048).tolist()]
 
     state.messages[-1][-1] = "▌"
     yield (state, state.to_gradio_chatbot()) + (disable_btn,) * 5
