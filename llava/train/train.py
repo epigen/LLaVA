@@ -749,12 +749,17 @@ class LazySupervisedDataset(Dataset):
 
         # image exist in the data
         if 'image' in self.list_data_dict[i]:
-            data_dict['image'] = torch.from_numpy(image)
+            # images = [instance['image'] for instance in instances]
+            # if all(x is not None and x.shape == images[0].shape for x in images):
+            #     batch['images'] = torch.stack(images)
+            # else:
+            #     batch['images'] = images
+            data_dict['images'] = torch.stack([torch.from_numpy(image)]).to(torch.float16)
         elif self.data_args.is_multimodal:
             # image does not exist in the data, but the model is multimodal
             raise NotImplementedError("need to add an 'empty' transcriptome vector")
             crop_size = self.data_args.image_processor.crop_size
-            data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+            data_dict['images'] = torch.zeros(3, crop_size['height'], crop_size['width'])
         return data_dict
 
 
@@ -782,10 +787,10 @@ class DataCollatorForSupervisedDataset(object):
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
 
-        if 'image' in instances[0]:
-            images = [instance['image'] for instance in instances]
+        if 'images' in instances[0]:
+            images = [instance["images"] for instance in instances]
             if all(x is not None and x.shape == images[0].shape for x in images):
-                batch['images'] = torch.stack(images)
+                batch['images'] = torch.stack(images)  # concat works as well because the collator anyways flattens them.
             else:
                 batch['images'] = images
 
@@ -924,13 +929,15 @@ def train(attn_implementation=None):
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
+            logging.warning(f"Conversation version {model_args.version} not found. Using default.")
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
 
     model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
-    embed_dim = len((data_module["train_dataset"])[0]["image"])
+    embed_dim = (data_module["train_dataset"])[0]["images"].shape[1]
+    logging.info(f"Identified embed_dim: {embed_dim}")
     if True:
         data_args.is_multimodal = True
         model.get_model().initialize_vision_modules(

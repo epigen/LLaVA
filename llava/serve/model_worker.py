@@ -280,8 +280,9 @@ if __name__ == "__main__":
     if args.multi_modal:
         logger.warning("Multimodal mode is automatically detected with model name, please make sure `llava` is included in the model path.")
 
-
     model_name=get_model_name_from_path(args.model_path)
+
+    assert "mistral" in model_name.lower() and "__" in model_name.lower(), "sure that you are not using a mistral model? LLaVA depends on having it in the name (if it is mistral)"
 
     worker = ModelWorker(args.controller_address,
                          args.worker_address,
