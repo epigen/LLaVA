@@ -141,7 +141,7 @@ class ModelWorker:
                 if len(images) != prompt.count(DEFAULT_IMAGE_TOKEN):
                     raise ValueError("Number of images does not match number of <image> tokens in prompt")
 
-                images = torch.tensor(images, device=self.model.device, dtype=torch.bfloat16)
+                images = torch.tensor(images, device=self.model.device, dtype=torch.float16)
 
                 replace_token = DEFAULT_IMAGE_TOKEN
                 if getattr(self.model.config, 'mm_use_im_start_end', False):
@@ -278,7 +278,7 @@ if __name__ == "__main__":
     logger.info(f"args: {args}")
 
     if args.multi_modal:
-        logger.warning("Multimodal mode is automatically detected with model name, please make sure `llava` is included in the model path.")
+        logger.warning("Multimodal mode is automatically detected with model name, please make sure `llava` or `__` is included in the model path.")
 
     model_name=get_model_name_from_path(args.model_path)
 
