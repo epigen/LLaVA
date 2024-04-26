@@ -187,6 +187,7 @@ class ModelWorker:
             max_new_tokens=max_new_tokens,
             streamer=streamer,
             use_cache=True,
+            pad_token_id=tokenizer.eos_token_id,  # explicitly request open-ended generation (suppresses warnings)
             **image_args
         ))
         thread.start()

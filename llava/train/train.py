@@ -20,8 +20,9 @@ from dataclasses import dataclass, field
 import json
 import logging
 import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Dict, Optional, Sequence, Union
 import numpy as np
+
 
 
 import torch
@@ -661,12 +662,19 @@ def preprocess(
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
-    def __init__(self, data_path: str,
+    def __init__(self, data_path: Union[str, pathlib.Path, Dict],
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments):
+        """
+        data_path: If `Dict` then the data directly, otherwise load from file
+
+        """
         super(LazySupervisedDataset, self).__init__()
 
-        list_data_dict = json.load(open(data_path, "r"))
+        if isinstance(data_path, dict):
+            list_data_dict = data_path
+        else:
+            list_data_dict = json.load(open(data_path, "r"))
 
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer

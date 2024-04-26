@@ -13,11 +13,13 @@ def parse_args():
     parser.add_argument('-s', '--select', nargs='*', default=None)
     parser.add_argument('-f', '--files', nargs='*', default=[])
     parser.add_argument('-i', '--ignore', nargs='*', default=[])
+    parser.add_argument('-o', '--output', default=None)
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     args = parse_args()
+    out_file = open(args.output, 'w')
 
     if args.ignore is not None:
         args.ignore = [int(x) for x in args.ignore]
@@ -44,7 +46,7 @@ if __name__ == '__main__':
                 review = json.loads(review_str)
                 if review['question_id'] in args.ignore:
                     continue
-                if 'category' in review:
+                if 'category' in review and review["category"] is not None:
                     scores[review['category']].append(review['tuple'])
                     scores['all'].append(review['tuple'])
                 else:
@@ -56,5 +58,7 @@ if __name__ == '__main__':
             stats = np.asarray(v).mean(0).tolist()
             stats = [round(x, 3) for x in stats]
             # print(k, stats, round(stats[1]/stats[0]*100, 1))
-            print(k, round(stats[1]/stats[0]*100, 1), round(stats[0] * 10, 1), round(stats[1] * 10, 1))
+            out_file.write(f'{config}\t{k}\t{round(stats[0]/stats[1]*100, 1)}\t{round(stats[0] * 10, 1)}\t{round(stats[1] * 10, 1)}\n')
+            print(k, round(stats[0]/stats[1]*100, 1), round(stats[0] * 10, 1), round(stats[1] * 10, 1))
         print('=================================')
+    out_file.close()

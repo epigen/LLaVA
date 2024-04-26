@@ -96,6 +96,8 @@ def eval_model(args):
     conv.append_message(conv.roles[1], None)
     prompt = conv.get_prompt()
 
+    # TODO check /home/moritz/Projects/cellwhisperer/modules/LLaVA/llava/eval/model_vqa.py on how to adapt for transcriptomes
+
     image_files = image_parser(args)
     images = load_images(image_files)
     image_sizes = [x.size for x in images]
