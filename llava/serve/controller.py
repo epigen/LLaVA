@@ -22,7 +22,8 @@ from llava.constants import CONTROLLER_HEART_BEAT_EXPIRATION
 from llava.utils import build_logger, server_error_msg
 
 
-logger = build_logger("controller", "controller.log")
+# logger = build_logger("controller", "controller.log")
+logger = logging.getLogger("controller")
 
 
 class DispatchMethod(Enum):

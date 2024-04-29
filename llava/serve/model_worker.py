@@ -28,12 +28,14 @@ from llava.mm_utils import process_images, load_image_from_base64, tokenizer_ima
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from transformers import TextIteratorStreamer
 from threading import Thread
+import logging
 
 
 GB = 1 << 30
 
 worker_id = str(uuid.uuid4())[:6]
-logger = build_logger("model_worker", f"model_worker_{worker_id}.log")
+# logger = build_logger("model_worker", f"model_worker_{worker_id}.log")
+logger = logging.getLogger("model_worker")
 global_counter = 0
 
 model_semaphore = None

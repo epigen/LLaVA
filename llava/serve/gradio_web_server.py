@@ -4,9 +4,11 @@ import json
 import os
 import time
 import numpy as np
+from typing import Optional
 
 import gradio as gr
 import requests
+import logging
 
 from llava.conversation import (default_conversation, conv_templates,
                                    SeparatorStyle)
@@ -16,7 +18,8 @@ from llava.utils import (build_logger, server_error_msg,
 import hashlib
 
 
-logger = build_logger("gradio_web_server", "gradio_web_server.log")
+# logger = build_logger("gradio_web_server", "gradio_web_server.log")
+logger = logging.getLogger("webserver")
 
 headers = {"User-Agent": "LLaVA Client"}
 
@@ -126,8 +129,9 @@ def clear_history(request: gr.Request):
     return (state, state.to_gradio_chatbot(), "", None) + (disable_btn,) * 5
 
 
-def add_text(state, text, image, image_process_mode, request: gr.Request):
-    logger.info(f"add_text. ip: {request.client.host}. len: {len(text)}")
+def add_text(state, text, image, image_process_mode, request: Optional[gr.Request] = None):
+    if request is not None:
+        logger.info(f"add_text. ip: {request.client.host}. len: {len(text)}")
     if len(text) <= 0 and image is None:
         state.skip_next = True
         return (state, state.to_gradio_chatbot(), "", None) + (no_change_btn,) * 5
