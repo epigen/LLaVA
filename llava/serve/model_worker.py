@@ -185,6 +185,7 @@ class ModelWorker:
             inputs=input_ids,
             do_sample=do_sample,
             temperature=temperature,
+            repetition_penalty=1.2,  # https://arxiv.org/pdf/1909.05858
             top_p=top_p,
             max_new_tokens=max_new_tokens,
             streamer=streamer,
