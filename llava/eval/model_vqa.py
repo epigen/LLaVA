@@ -62,14 +62,21 @@ def eval_model(args):
         idx = line["question_id"]
         image_id = line["image"]
         qs = line["text"]
-        cur_prompt = qs
+        if isinstance(qs, str):
+            qs = [qs]
+
+        cur_prompt = qs[-1]  # not sure if this is what we want
+
         if model.config.mm_use_im_start_end:
-            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
+            qs[0] = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs[0]
         else:
-            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+            qs[0] = DEFAULT_IMAGE_TOKEN + '\n' + qs[0]
 
         conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], qs)
+        assert len(qs) % 2 == 1, "Must end with a user request"
+        for i, q in enumerate(qs):
+            conv.append_message(conv.roles[i%2], q)
+
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
