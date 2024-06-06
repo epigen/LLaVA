@@ -8,7 +8,7 @@ import openai
 import tqdm
 import time
 
-client = openai.OpenAI(api_key="sk-...")  # Initialize the OpenAI client
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # Initialize the OpenAI client
 
 def get_eval(system_prompt, content: str, max_tokens: int):
     while True:
