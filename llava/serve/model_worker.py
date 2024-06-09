@@ -7,7 +7,12 @@ import json
 import time
 import threading
 import uuid
+import re
 
+
+import numpy as np
+
+from llava.mm_utils import get_model_name_from_path
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 import requests
@@ -23,12 +28,14 @@ from llava.mm_utils import process_images, load_image_from_base64, tokenizer_ima
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from transformers import TextIteratorStreamer
 from threading import Thread
+import logging
 
 
 GB = 1 << 30
 
 worker_id = str(uuid.uuid4())[:6]
-logger = build_logger("model_worker", f"model_worker_{worker_id}.log")
+# logger = build_logger("model_worker", f"model_worker_{worker_id}.log")
+logger = logging.getLogger("model_worker")
 global_counter = 0
 
 model_semaphore = None
@@ -64,7 +71,7 @@ class ModelWorker:
         logger.info(f"Loading the model {self.model_name} on worker {worker_id} ...")
         self.tokenizer, self.model, self.image_processor, self.context_len = load_pretrained_model(
             model_path, model_base, self.model_name, load_8bit, load_4bit, device=self.device, use_flash_attn=use_flash_attn)
-        self.is_multimodal = 'llava' in self.model_name.lower()
+        self.is_multimodal = True  # 'llava' in self.model_name.lower()
 
         if not no_register:
             self.register_to_controller()
@@ -121,6 +128,10 @@ class ModelWorker:
 
     @torch.inference_mode()
     def generate_stream(self, params):
+        """
+        Here "images" are transcriptome_embeddings
+        """
+
         tokenizer, model, image_processor = self.tokenizer, self.model, self.image_processor
 
         prompt = params["prompt"]
@@ -132,21 +143,18 @@ class ModelWorker:
                 if len(images) != prompt.count(DEFAULT_IMAGE_TOKEN):
                     raise ValueError("Number of images does not match number of <image> tokens in prompt")
 
-                images = [load_image_from_base64(image) for image in images]
-                image_sizes = [image.size for image in images]
-                images = process_images(images, image_processor, model.config)
-
-                if type(images) is list:
-                    images = [image.to(self.model.device, dtype=torch.float16) for image in images]
-                else:
-                    images = images.to(self.model.device, dtype=torch.float16)
+                images = torch.tensor(images, device=self.model.device, dtype=torch.bfloat16)
 
                 replace_token = DEFAULT_IMAGE_TOKEN
                 if getattr(self.model.config, 'mm_use_im_start_end', False):
                     replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
                 prompt = prompt.replace(DEFAULT_IMAGE_TOKEN, replace_token)
 
-                num_image_tokens = prompt.count(replace_token) * model.get_vision_tower().num_patches
+                # TODO use the 'num-token' information in `mm_projector_type`
+
+                num_tokens = int(re.match(r'^mlp(\d+)x_(\d+)t_gelu$', model.config.mm_projector_type).group(2))
+                num_image_tokens = prompt.count(replace_token) * num_tokens
+                image_sizes = None
             else:
                 images = None
                 image_sizes = None
@@ -177,10 +185,12 @@ class ModelWorker:
             inputs=input_ids,
             do_sample=do_sample,
             temperature=temperature,
+            repetition_penalty=1.2,  # https://arxiv.org/pdf/1909.05858
             top_p=top_p,
             max_new_tokens=max_new_tokens,
             streamer=streamer,
             use_cache=True,
+            pad_token_id=tokenizer.eos_token_id,  # explicitly request open-ended generation (suppresses warnings)
             **image_args
         ))
         thread.start()
@@ -188,9 +198,9 @@ class ModelWorker:
         generated_text = ori_prompt
         for new_text in streamer:
             generated_text += new_text
-            if generated_text.endswith(stop_str):
+            if stop_str is not None and generated_text.endswith(stop_str):
                 generated_text = generated_text[:-len(stop_str)]
-            yield json.dumps({"text": generated_text, "error_code": 0}).encode() + b"\0"
+            yield json.dumps({"text": generated_text, "error_code": 0}).encode() + b"\0"  # the zero-byte is required (at least in the webserver)
 
     def generate_stream_gate(self, params):
         try:
@@ -232,7 +242,7 @@ def release_model_semaphore(fn=None):
 async def generate_stream(request: Request):
     global model_semaphore, global_counter
     global_counter += 1
-    params = await request.json()
+    params = await request.json()  # TODO consider sending via bytes-array (e.g. pickle or proto-buffers)
 
     if model_semaphore is None:
         model_semaphore = asyncio.Semaphore(args.limit_model_concurrency)
@@ -259,7 +269,7 @@ if __name__ == "__main__":
         default="http://localhost:21001")
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
     parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--model-name", type=str)
+    # parser.add_argument("--model-name", type=str)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--multi-modal", action="store_true", help="Multimodal mode is automatically detected with model name, please make sure `llava` is included in the model path.")
     parser.add_argument("--limit-model-concurrency", type=int, default=5)
@@ -272,7 +282,11 @@ if __name__ == "__main__":
     logger.info(f"args: {args}")
 
     if args.multi_modal:
-        logger.warning("Multimodal mode is automatically detected with model name, please make sure `llava` is included in the model path.")
+        logger.warning("Multimodal mode is automatically detected with model name, please make sure `llava` or `__` is included in the model path.")
+
+    model_name=get_model_name_from_path(args.model_path)
+
+    assert "mistral" in model_name.lower() and "__" in model_name.lower(), "sure that you are not using a mistral model? LLaVA depends on having it in the name (if it is mistral)"
 
     worker = ModelWorker(args.controller_address,
                          args.worker_address,
@@ -280,7 +294,7 @@ if __name__ == "__main__":
                          args.no_register,
                          args.model_path,
                          args.model_base,
-                         args.model_name,
+                         model_name,
                          args.load_8bit,
                          args.load_4bit,
                          args.device,

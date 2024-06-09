@@ -1,7 +1,12 @@
+"""
+Note. Currently no support for `mm_vision_select_layer`
+"""
 import argparse
 import torch
 import os
 import json
+import numpy as np
+
 from tqdm import tqdm
 import shortuuid
 
@@ -31,44 +36,66 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
 
+    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name, device="cuda")
+
+    # Questions
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
-    questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
+    questions = get_chunk(questions, args.num_chunks, args.chunk_idx)  # no-op with default args
+
+
+    # Load image data
+    image_data = dict(np.load(args.image_data, allow_pickle=True))
+
+    nans = np.where(np.isnan(image_data["transcriptome_embeds"]))
+    broken_ids = image_data["orig_ids"][np.unique(nans[0])]
+    assert len(broken_ids) == 0, f"Found broken ids: {broken_ids}"
+
+    orig_id_to_int = {k: v for k, v in zip(image_data["orig_ids"], range(len(image_data["orig_ids"])))}
+    assert all([q["image"] in orig_id_to_int for q in questions])
+
+    # Prepare answers file
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
     ans_file = open(answers_file, "w")
     for line in tqdm(questions):
         idx = line["question_id"]
-        image_file = line["image"]
+        image_id = line["image"]
         qs = line["text"]
-        cur_prompt = qs
+        if isinstance(qs, str):
+            qs = [qs]
+
+        cur_prompt = qs[-1]  # not sure if this is what we want
+
         if model.config.mm_use_im_start_end:
-            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
+            qs[0] = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs[0]
         else:
-            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+            qs[0] = DEFAULT_IMAGE_TOKEN + '\n' + qs[0]
 
         conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], qs)
+        assert len(qs) % 2 == 1, "Must end with a user request"
+        for i, q in enumerate(qs):
+            conv.append_message(conv.roles[i%2], q)
+
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(model.device)
 
-        image = Image.open(os.path.join(args.image_folder, image_file)).convert('RGB')
-        image_tensor = process_images([image], image_processor, model.config)[0]
+        image_tensor = torch.tensor(image_data["transcriptome_embeds"][orig_id_to_int[image_id]], device=model.device, dtype=torch.bfloat16).unsqueeze(0)  # We are using bfloat16
 
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids,
-                images=image_tensor.unsqueeze(0).half().cuda(),
-                image_sizes=[image.size],
+                images=image_tensor,
+                image_sizes=None,
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
                 top_p=args.top_p,
                 num_beams=args.num_beams,
                 # no_repeat_ngram_size=3,
                 max_new_tokens=1024,
+                pad_token_id=tokenizer.eos_token_id,  # explicitly request open-ended generation (suppresses warnings)
                 use_cache=True)
 
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
@@ -87,7 +114,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
     parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--image-folder", type=str, default="")
+    parser.add_argument("--image-data", type=str, default="")
     parser.add_argument("--question-file", type=str, default="tables/question.jsonl")
     parser.add_argument("--answers-file", type=str, default="answer.jsonl")
     parser.add_argument("--conv-mode", type=str, default="llava_v1")

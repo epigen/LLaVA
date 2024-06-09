@@ -14,6 +14,7 @@
 
 
 from abc import ABC, abstractmethod
+import logging
 
 import torch
 import torch.nn as nn
@@ -46,9 +47,9 @@ class LlavaMetaModel:
             vision_tower = vision_tower[0]
         return vision_tower
 
-    def initialize_vision_modules(self, model_args, fsdp=None):
+    def initialize_vision_modules(self, model_args, fsdp=None, hidden_size=None):
         vision_tower = model_args.vision_tower
-        mm_vision_select_layer = model_args.mm_vision_select_layer
+        # mm_vision_select_layer = model_args.mm_vision_select_layer
         mm_vision_select_feature = model_args.mm_vision_select_feature
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
         mm_patch_merge_type = model_args.mm_patch_merge_type
@@ -71,8 +72,8 @@ class LlavaMetaModel:
 
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, 'mm_projector_type', 'linear')
-        self.config.mm_hidden_size = vision_tower.hidden_size
-        self.config.mm_vision_select_layer = mm_vision_select_layer
+        self.config.mm_hidden_size = hidden_size or vision_tower.hidden_size
+        # self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.mm_patch_merge_type = mm_patch_merge_type
 
@@ -138,19 +139,30 @@ class LlavaMetaForCausalLM(ABC):
         return self.get_model().get_vision_tower()
 
     def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
-        image_features = self.get_model().mm_projector(image_features)
+        # We already pass image embeddings as a dataset, so no to run the image tower
+        # image_features = self.get_model().get_vision_tower()(images)
+        image_features = self.get_model().mm_projector(images)
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
         images, image_sizes=None
     ):
-        vision_tower = self.get_vision_tower()
-        if vision_tower is None or images is None or input_ids.shape[1] == 1:
+        vision_tower = self.get_vision_tower()  # TODO unused delete
+        if images is None or input_ids.shape[1] == 1:  # this is being called from the second token on (for efficient inference) # or vision_tower is None
+            # TODO debug this at some point whether everything works as it should (the commented block below got deleted in a newer version of llava)
+            # if past_key_values is not None and images is not None and input_ids.shape[1] == 1:  # and vision_tower is not None (our vision_tower is None, sorry)
+            #     target_shape = past_key_values[-1][-1].shape[-2] + 1
+            #     attention_mask = torch.cat((attention_mask, torch.ones(
+            #         (attention_mask.shape[0], target_shape - attention_mask.shape[1]),
+            #         dtype=attention_mask.dtype,
+            #         device=attention_mask.device
+            #     )), dim=1)
+            #     position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-        if type(images) is list or images.ndim == 5:
+        if type(images) is list or images.ndim == 5:  # TODO delete?
+            raise NotImplemented("should not be called as these are for read images")
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
             concat_images = torch.cat([image for image in images], dim=0)
@@ -159,6 +171,7 @@ class LlavaMetaForCausalLM(ABC):
             image_features = torch.split(image_features, split_sizes, dim=0)
             mm_patch_merge_type = getattr(self.config, 'mm_patch_merge_type', 'flat')
             image_aspect_ratio = getattr(self.config, 'image_aspect_ratio', 'square')
+
             if mm_patch_merge_type == 'flat':
                 image_features = [x.flatten(0, 1) for x in image_features]
             elif mm_patch_merge_type.startswith('spatial'):
@@ -229,12 +242,14 @@ class LlavaMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
+
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             if num_images == 0:
+                logging.warning("Weird code is executed (image is consumed but not used)")
                 cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
-                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
+                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)  # doesn't make sense (0:0 yields empty tensor. also, why not prepend?)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
                 cur_image_idx += 1

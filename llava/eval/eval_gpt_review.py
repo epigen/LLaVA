@@ -1,56 +1,34 @@
 import argparse
 import json
 import os
+import numpy as np
+
 
 import openai
 import tqdm
-import ray
 import time
 
-NUM_SECONDS_TO_SLEEP = 3
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # Initialize the OpenAI client
 
-@ray.remote(num_cpus=4)
-def get_eval(content: str, max_tokens: int):
+def get_eval(system_prompt, content: str, max_tokens: int):
     while True:
         try:
-            response = openai.ChatCompletion.create(
-                model='gpt-4',
-                messages=[{
-                    'role': 'system',
-                    'content': 'You are a helpful and precise assistant for checking the quality of the answer.'
-                }, {
-                    'role': 'user',
-                    'content': content,
-                }],
-                temperature=0.2,  # TODO: figure out which temperature is best for evaluation
+            response = client.chat.completions.create(
+                model="gpt-4-turbo-preview",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content}
+                ],
                 max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                temperature=0.0,
             )
-            break
-        except openai.error.RateLimitError:
-            pass
+            return response.choices[0].message.content
         except Exception as e:
             print(e)
-        time.sleep(NUM_SECONDS_TO_SLEEP)
-
-    print('success!')
-    return response['choices'][0]['message']['content']
 
 
-def parse_score(review):
-    try:
-        score_pair = review.split('\n')[0]
-        score_pair = score_pair.replace(',', ' ')
-        sp = score_pair.split(' ')
-        if len(sp) == 2:
-            return [float(sp[0]), float(sp[1])]
-        else:
-            print('error', review)
-            return [-1, -1]
-    except Exception as e:
-        print(e)
-        print('error', review)
-        return [-1, -1]
-
+    # return response['choices'][0]['message']['content']
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='ChatGPT-based QA evaluation.')
@@ -62,52 +40,49 @@ if __name__ == '__main__':
     parser.add_argument('--max-tokens', type=int, default=1024, help='maximum number of tokens produced in the output')
     args = parser.parse_args()
 
-    ray.init()
-
     f_q = open(os.path.expanduser(args.question))
-    f_ans1 = open(os.path.expanduser(args.answer_list[0]))
-    f_ans2 = open(os.path.expanduser(args.answer_list[1]))
+    f_ans = [open(os.path.expanduser(ans_f)) for ans_f in args.answer_list]
+    answer_names = [os.path.basename(ans_f).split('.')[0] for ans_f in args.answer_list]
     rule_dict = json.load(open(os.path.expanduser(args.rule), 'r'))
 
     review_file = open(f'{args.output}', 'w')
 
-    js_list = []
-    handles = []
-    idx = 0
-    for ques_js, ans1_js, ans2_js in zip(f_q, f_ans1, f_ans2):
-        # if idx == 1:
-        #     break
+    for idx, ques_ans in enumerate(tqdm.tqdm(zip(f_q, *f_ans))):
+        ques = json.loads(ques_ans[0])
+        ans = [json.loads(ans_js) for ans_js in ques_ans[1:]]
 
-        ques = json.loads(ques_js)
-        ans1 = json.loads(ans1_js)
-        ans2 = json.loads(ans2_js)
+        # shuffle the answers to avoid bias. store the shuffling indices to restore later
+        idx_shuffle = np.random.permutation(len(ans))
+        revert_idx_shuffle = np.argsort(idx_shuffle)
+        shuffled_ans = [ans[i] for i in idx_shuffle]
 
-        category = json.loads(ques_js)['category']
+        category = json.loads(ques_ans[0]).get('category')
         if category in rule_dict:
             rule = rule_dict[category]
         else:
             rule = rule_dict['default']
-        prompt = rule['prompt']
+        system_prompt = rule['prompt']
         role = rule['role']
-        content = (f'[Question]\n{ques["text"]}\n\n'
-                   f'[{role} 1]\n{ans1["text"]}\n\n[End of {role} 1]\n\n'
-                   f'[{role} 2]\n{ans2["text"]}\n\n[End of {role} 2]\n\n'
-                   f'[System]\n{prompt}\n\n')
-        js_list.append({
-            'id': idx+1,
-            'question_id': ques['question_id'],
-            'answer1_id': ans1['answer_id'],
-            'answer2_id': ans2['answer_id'],
-            'category': category})
-        idx += 1
-        handles.append(get_eval.remote(content, args.max_tokens))
-        # To avoid the rate limit set by OpenAI
-        time.sleep(NUM_SECONDS_TO_SLEEP)
+        content = (f'[Question]\n{ques["text"]}\n\n[End of Question]\n\n'
+                   f'[Reference]\n{ques["reference"]}\n\n[End of Reference]\n\n')
 
-    reviews = ray.get(handles)
-    for idx, review in enumerate(reviews):
-        scores = parse_score(review)
-        js_list[idx]['content'] = review
-        js_list[idx]['tuple'] = scores
-        review_file.write(json.dumps(js_list[idx]) + '\n')
+        for i, ans_i in enumerate(shuffled_ans):
+            content += f'[{role} {i+1}]\n{ans_i["text"]}\n\n[End of {role} {i+1}]\n\n'
+
+        res = get_eval(system_prompt, content, args.max_tokens)
+
+        review_dict = json.loads(res)
+
+        # store the reverted order for the answers
+        write_dict = ({
+            'id': idx+1,  # why not start with 0?
+            'question_id': ques['question_id'],
+            'answer_ids': [ans_i['answer_id'] for ans_i in ans],
+            'content': review_dict["explanation"],
+            'scores': {
+                answer_name: review_dict[f"assistant_{reverted_score+1}"] for answer_name, reverted_score in zip(answer_names, revert_idx_shuffle)
+            },
+            'category': category})
+        review_file.write(json.dumps(write_dict) + '\n')
+
     review_file.close()

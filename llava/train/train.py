@@ -20,7 +20,10 @@ from dataclasses import dataclass, field
 import json
 import logging
 import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Dict, Optional, Sequence, Union
+import numpy as np
+
+
 
 import torch
 
@@ -57,7 +60,6 @@ class ModelArguments:
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=False)
     vision_tower: Optional[str] = field(default=None)
-    mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
     mm_projector_type: Optional[str] = field(default='linear')
     mm_use_im_start_end: bool = field(default=False)
@@ -72,8 +74,9 @@ class DataArguments:
                            metadata={"help": "Path to the training data."})
     lazy_preprocess: bool = False
     is_multimodal: bool = False
-    image_folder: Optional[str] = field(default=None)
+    image_data: Optional[str] = field(default=None)
     image_aspect_ratio: str = 'square'
+    mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
 
 
 @dataclass
@@ -313,6 +316,7 @@ def preprocess_multimodal(
     if not is_multimodal:
         return sources
 
+    # TODO why does it place the image token to the start again here?
     for source in sources:
         for sentence in source:
             if DEFAULT_IMAGE_TOKEN in sentence['value']:
@@ -658,34 +662,66 @@ def preprocess(
 class LazySupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
-    def __init__(self, data_path: str,
+    def __init__(self, data_path: Union[str, pathlib.Path, Dict],
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments):
+        """
+        data_path: If `Dict` then the data directly, otherwise load from file
+
+        """
         super(LazySupervisedDataset, self).__init__()
-        list_data_dict = json.load(open(data_path, "r"))
+
+        if isinstance(data_path, dict):
+            list_data_dict = data_path
+        else:
+            list_data_dict = json.load(open(data_path, "r"))
 
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
 
+        self.image_data = dict(np.load(self.data_args.image_data, allow_pickle=True))
+
+        # Identify nan rows from images and filter list_data_dict to not contain those entries
+        nans = np.where(np.isnan(self.image_data["transcriptome_embeds"]))
+        broken_ids = self.image_data["orig_ids"][np.unique(nans[0])]
+
+        self.select_layer = data_args.mm_vision_select_layer
+
+        self.orig_id_to_int = {k: v for k, v in zip(self.image_data["orig_ids"], range(len(self.image_data["orig_ids"])))}
+        # filter list_data_dict to only contain valid keys
+        self.list_data_dict = [e for e in self.list_data_dict if e["image"] in self.orig_id_to_int and e["image"] not in broken_ids]
+
     def __len__(self):
         return len(self.list_data_dict)
 
     @property
     def lengths(self):
+        """
+        TODO: what is this function for. do I need it? is img_tokens 128 indicating that one image gets converted to 128 tokens? Why do we split words naively into tokens?
+        """
         length_list = []
         for sample in self.list_data_dict:
-            img_tokens = 128 if 'image' in sample else 0
-            length_list.append(sum(len(conv['value'].split()) for conv in sample['conversations']) + img_tokens)
+            img_tokens = 128 if "image" in sample else 0
+            length_list.append(
+                sum(len(conv["value"].split()) for conv in sample["conversations"])
+                + img_tokens
+            )
         return length_list
 
     @property
     def modality_lengths(self):
+        """
+        Returns the total length of each conversation. If no "image" in the sample, return the negative of the length.
+        Used for sorting samples (for training)
+        """
         length_list = []
         for sample in self.list_data_dict:
-            cur_len = sum(len(conv['value'].split()) for conv in sample['conversations'])
-            cur_len = cur_len if 'image' in sample else -cur_len
+            cur_len = sum(
+                len(conv["value"].split()) for conv in sample["conversations"]
+            )
+            cur_len = cur_len if "image" in sample else -cur_len
             length_list.append(cur_len)
         return length_list
 
@@ -694,31 +730,21 @@ class LazySupervisedDataset(Dataset):
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
-        if 'image' in sources[0]:
-            image_file = self.list_data_dict[i]['image']
-            image_folder = self.data_args.image_folder
-            processor = self.data_args.image_processor
-            image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
-            if self.data_args.image_aspect_ratio == 'pad':
-                def expand2square(pil_img, background_color):
-                    width, height = pil_img.size
-                    if width == height:
-                        return pil_img
-                    elif width > height:
-                        result = Image.new(pil_img.mode, (width, width), background_color)
-                        result.paste(pil_img, (0, (width - height) // 2))
-                        return result
-                    else:
-                        result = Image.new(pil_img.mode, (height, height), background_color)
-                        result.paste(pil_img, ((height - width) // 2, 0))
-                        return result
-                image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+        if "image" in sources[0]:
+            idx = self.orig_id_to_int[self.list_data_dict[i]["image"]]
+            if self.select_layer == -1:  # get shared embeddings
+                key = "transcriptome_embeds"
+            elif self.select_layer == -2:  # get image block output (features)
+                key = "transcriptome_features"
             else:
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+                raise ValueError("select_layer must be -1 or -2")
+            image = self.image_data[key][idx]
+
+            if self.data_args.image_aspect_ratio == 'pad':
+                pass
             sources = preprocess_multimodal(
-                copy.deepcopy([e["conversations"] for e in sources]),
-                self.data_args)
+                copy.deepcopy([e["conversations"] for e in sources]), self.data_args
+            )
         else:
             sources = copy.deepcopy([e["conversations"] for e in sources])
         data_dict = preprocess(
@@ -731,11 +757,17 @@ class LazySupervisedDataset(Dataset):
 
         # image exist in the data
         if 'image' in self.list_data_dict[i]:
-            data_dict['image'] = image
+            # images = [instance['image'] for instance in instances]
+            # if all(x is not None and x.shape == images[0].shape for x in images):
+            #     batch['images'] = torch.stack(images)
+            # else:
+            #     batch['images'] = images
+            data_dict['images'] = torch.stack([torch.from_numpy(image)]).to(torch.float16)
         elif self.data_args.is_multimodal:
             # image does not exist in the data, but the model is multimodal
+            raise NotImplementedError("need to add an 'empty' transcriptome vector")
             crop_size = self.data_args.image_processor.crop_size
-            data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+            data_dict['images'] = torch.zeros(3, crop_size['height'], crop_size['width'])
         return data_dict
 
 
@@ -763,10 +795,10 @@ class DataCollatorForSupervisedDataset(object):
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
 
-        if 'image' in instances[0]:
-            images = [instance['image'] for instance in instances]
+        if 'images' in instances[0]:
+            images = [instance["images"] for instance in instances]
             if all(x is not None and x.shape == images[0].shape for x in images):
-                batch['images'] = torch.stack(images)
+                batch['images'] = torch.stack(images)  # concat works as well because the collator anyways flattens them.
             else:
                 batch['images'] = images
 
@@ -813,7 +845,7 @@ def train(attn_implementation=None):
             )
         ))
 
-    if model_args.vision_tower is not None:
+    if True:
         if 'mpt' in model_args.model_name_or_path:
             config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
             config.attn_config['attn_impl'] = training_args.mpt_attn_impl
@@ -905,21 +937,22 @@ def train(attn_implementation=None):
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
+            logging.warning(f"Conversation version {model_args.version} not found. Using default.")
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
-    if model_args.vision_tower is not None:
+    data_module = make_supervised_data_module(tokenizer=tokenizer,
+                                              data_args=data_args)
+
+    model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
+    embed_dim = (data_module["train_dataset"])[0]["images"].shape[1]
+    logging.info(f"Identified embed_dim: {embed_dim}")
+    if True:
+        data_args.is_multimodal = True
         model.get_model().initialize_vision_modules(
             model_args=model_args,
-            fsdp=training_args.fsdp
+            fsdp=training_args.fsdp,
+            hidden_size=embed_dim
         )
-        
-        vision_tower = model.get_vision_tower()
-        vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
-
-        data_args.image_processor = vision_tower.image_processor
-        data_args.is_multimodal = True
-
-        model.config.image_aspect_ratio = data_args.image_aspect_ratio
         model.config.tokenizer_padding_side = tokenizer.padding_side
         model.config.tokenizer_model_max_length = tokenizer.model_max_length
 
@@ -937,10 +970,17 @@ def train(attn_implementation=None):
         if training_args.bits in [4, 8]:
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
 
-        model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_projector_lr = training_args.mm_projector_lr
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
+
+    if model_args.vision_tower is not None:
+        vision_tower = model.get_vision_tower()
+        vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+
+        data_args.image_processor = vision_tower.image_processor
+
+        model.config.image_aspect_ratio = data_args.image_aspect_ratio
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
     if training_args.bits in [4, 8]:
@@ -956,8 +996,6 @@ def train(attn_implementation=None):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
-    data_module = make_supervised_data_module(tokenizer=tokenizer,
-                                              data_args=data_args)
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
