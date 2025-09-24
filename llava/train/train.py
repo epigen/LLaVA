@@ -333,6 +333,100 @@ def preprocess_multimodal(
     return sources
 
 
+def preprocess_llama_3(
+    sources,
+    tokenizer: transformers.PreTrainedTokenizer,
+    has_image: bool = False
+) -> Dict:
+
+    conv = conversation_lib.default_conversation.copy()
+    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
+
+    # Apply prompt templates
+    conversations = []
+    for i, source in enumerate(sources):
+        if roles[source[0]["from"]] != conv.roles[0]:
+            # Skip the first one if it is not from human
+            source = source[1:]
+
+        conv.messages = []
+        for j, sentence in enumerate(source):
+            role = roles[sentence["from"]]
+            assert role == conv.roles[j % 2], f"{i}"
+            conv.append_message(role, sentence["value"])
+        conversations.append(conv.get_prompt())
+
+    # Tokenize conversations
+
+    if has_image:
+        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
+    else:
+        input_ids = tokenizer(
+            conversations,
+            return_tensors="pt",
+            padding="longest",
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+        ).input_ids
+
+    targets = input_ids.clone()
+
+    assert conv.sep_style == conversation_lib.SeparatorStyle.LLAMA_3
+
+    # Mask targets
+
+    for conversation, target in zip(conversations, targets):
+        total_len = int(target.ne(tokenizer.pad_token_id).sum())  # potential source 1
+
+        sep2 = "<|eot_id|><|start_header_id|>user<|end_header_id|>\n"
+        sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
+        rounds = conversation.split(sep2) # Previously </s>.
+        sep2_token_len = 4  # len(tokenizer(sep2).input_ids)  NOTE tokenizer returns len 6, but 4 seems to be correct
+        sep_token_len = 4  # len(tokenizer(sep).input_ids)
+        cur_len = 0
+        target[:cur_len] = IGNORE_INDEX
+        for i, rou in enumerate(rounds):
+            if rou == "":
+                break
+
+            parts = rou.split(sep)  # previously [/INST]
+            if len(parts) != 2:
+                break
+            parts[0] += sep
+
+            if has_image:
+                round_len = len(tokenizer_image_token(rou, tokenizer))
+                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - sep_token_len
+            else:
+                round_len = len(tokenizer(rou).input_ids)
+                instruction_len = len(tokenizer(parts[0]).input_ids) - sep_token_len
+
+            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+
+            cur_len += round_len
+
+            if i < len(rounds)-1:
+                target[cur_len : cur_len + sep2_token_len] = IGNORE_INDEX
+                cur_len += sep2_token_len
+
+        target[cur_len:] = IGNORE_INDEX
+
+        if cur_len < tokenizer.model_max_length:
+            if cur_len != total_len:
+                target[:] = IGNORE_INDEX
+                print(
+                    f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
+                    f" (ignored)"
+                )
+
+    return dict(
+        input_ids=input_ids,
+        labels=targets,
+    )
+
+
+
+
 def preprocess_llama_2(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -627,10 +721,13 @@ def preprocess(
         return preprocess_plain(sources, tokenizer)
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
+    if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_3:
+        return preprocess_llama_3(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version.startswith("v1"):
         return preprocess_v1(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version == "mpt":
         return preprocess_mpt(sources, tokenizer, has_image=has_image)
+
     # add end signal and concatenate together
     conversations = []
     for source in sources:
@@ -683,15 +780,22 @@ class LazySupervisedDataset(Dataset):
 
         self.image_data = dict(np.load(self.data_args.image_data, allow_pickle=True))
 
+        if data_args.mm_vision_select_layer == -1:  # get shared embeddings
+            self.image_data_key = "transcriptome_embeds"
+        elif data_args.mm_vision_select_layer == -2:  # get image block output (features)
+            self.image_data_key = "transcriptome_features"
+        else:
+            raise ValueError("select_layer must be -1 or -2")
+
         # Identify nan rows from images and filter list_data_dict to not contain those entries
-        nans = np.where(np.isnan(self.image_data["transcriptome_embeds"]))
+        nans = np.where(np.isnan(self.image_data[self.image_data_key]))
+
         broken_ids = self.image_data["orig_ids"][np.unique(nans[0])]
 
-        self.select_layer = data_args.mm_vision_select_layer
 
         self.orig_id_to_int = {k: v for k, v in zip(self.image_data["orig_ids"], range(len(self.image_data["orig_ids"])))}
         # filter list_data_dict to only contain valid keys
-        self.list_data_dict = [e for e in self.list_data_dict if e["image"] in self.orig_id_to_int and e["image"] not in broken_ids]
+        self.list_data_dict = [e for e in self.list_data_dict if "image" not in e or (e["image"] in self.orig_id_to_int and e["image"] not in broken_ids)]
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -732,13 +836,7 @@ class LazySupervisedDataset(Dataset):
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
         if "image" in sources[0]:
             idx = self.orig_id_to_int[self.list_data_dict[i]["image"]]
-            if self.select_layer == -1:  # get shared embeddings
-                key = "transcriptome_embeds"
-            elif self.select_layer == -2:  # get image block output (features)
-                key = "transcriptome_features"
-            else:
-                raise ValueError("select_layer must be -1 or -2")
-            image = self.image_data[key][idx]
+            image = self.image_data[self.image_data_key][idx]
 
             if self.data_args.image_aspect_ratio == 'pad':
                 pass
@@ -762,7 +860,7 @@ class LazySupervisedDataset(Dataset):
             #     batch['images'] = torch.stack(images)
             # else:
             #     batch['images'] = images
-            data_dict['images'] = torch.stack([torch.from_numpy(image)]).to(torch.float16)
+            data_dict['images'] = torch.stack([torch.from_numpy(image)]).to(torch.bfloat16)
         elif self.data_args.is_multimodal:
             # image does not exist in the data, but the model is multimodal
             raise NotImplementedError("need to add an 'empty' transcriptome vector")
@@ -933,7 +1031,11 @@ def train(attn_implementation=None):
     elif model_args.version == "v0.5":
         tokenizer.pad_token = tokenizer.unk_token
     else:
-        tokenizer.pad_token = tokenizer.unk_token
+        assert tokenizer.unk_token is not None or tokenizer.pad_token is not None, "Tokenizer must have unk or pad token"
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.unk_token
+            logging.info("Setting pad token to unk token")
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
@@ -944,9 +1046,10 @@ def train(attn_implementation=None):
                                               data_args=data_args)
 
     model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
-    embed_dim = (data_module["train_dataset"])[0]["images"].shape[1]
-    logging.info(f"Identified embed_dim: {embed_dim}")
-    if True:
+
+    if "images" in (data_module["train_dataset"])[0]:
+        embed_dim = (data_module["train_dataset"])[0]["images"].shape[1]
+        logging.info(f"Identified embed_dim: {embed_dim}")
         data_args.is_multimodal = True
         model.get_model().initialize_vision_modules(
             model_args=model_args,
@@ -967,7 +1070,7 @@ def train(attn_implementation=None):
             for p in model.get_model().mm_projector.parameters():
                 p.requires_grad = False
 
-        if training_args.bits in [4, 8]:
+        if training_args.bits in [4, 8] or training_args.bf16:
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
 
         model.config.mm_projector_lr = training_args.mm_projector_lr
